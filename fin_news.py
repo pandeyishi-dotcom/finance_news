@@ -289,7 +289,16 @@ with tabs[6]:
 # ---- Footer ----
 st.markdown("---")
 st.markdown(
+    st.markdown(
     """
+**Some text or table**
+- point 1  
+- point 2  
+- etc...
+""",
+    unsafe_allow_html=True,
+)
+
 ### ✅ Next Steps
 - Integrate Polygon / Finnhub for live data  
 - Add persistent storage (Supabase / Firebase)  
