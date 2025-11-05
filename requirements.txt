@@ -1,8 +1,10 @@
-streamlit>=1.25.0
-yfinance>=0.2.21
+streamlit>=1.28.0
 pandas>=2.0
-numpy>=1.24
-plotly>=5.0
-st-aggrid>=0.4.0   # optional: used if available
-openai>=1.0.0      # optional: for AI features (or use 'openai' / official OpenAI client as you prefer)
-python-dotenv>=1.0
+numpy>=1.25
+plotly>=5.15.0
+yfinance>=0.2.40
+python-dotenv>=1.0.1
+
+# Optional packages – comment out if build fails
+# st-aggrid>=0.4.0
+# openai>=1.2.0
