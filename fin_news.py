@@ -230,15 +230,11 @@ with tabs[6]:
         st.download_button("Download CSV", csv.getvalue(), file_name="portfolio.csv")
 # ---------- FOOTER ----------
 st.markdown("---")
-
-st.markdown(
-    """
 ### ✅ Next Steps
 - Integrate Polygon / Finnhub for live data  
 - Add persistent storage (Supabase / Firebase)  
 - Integrate vectorbt or backtrader for pro backtests  
 - Enable OpenAI in Secrets for full AI functionality  
-
 **Secrets Example (Streamlit Cloud):**
 
 
