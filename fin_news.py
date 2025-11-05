@@ -241,4 +241,4 @@ st.markdown(
 - Integrate vectorbt or backtrader for pro backtests  
 - Enable OpenAI in Secrets for full AI functionality  
 
-**Secrets Example (Streamlit Cloud):**
+
