@@ -332,7 +332,9 @@ with tabs[6]:
         st.download_button("Download CSV", csv_buf.getvalue(), file_name=f"portfolio_{datetime.utcnow().date()}.csv")
 
 # ---- Footer ----
+# ---- Footer ----
 st.markdown("---")
+
 st.markdown(
     """
 **Some text or table**
@@ -344,10 +346,7 @@ st.markdown(
 )
 
 st.markdown(
-    """,
-    unsafe_allow_html=True,
-)
-
+    """
 ### ✅ Next Steps
 - Integrate Polygon / Finnhub for live data  
 - Add persistent storage (Supabase / Firebase)  
@@ -355,3 +354,4 @@ st.markdown(
 - Enable OpenAI in secrets for full AI functionality  
 
 **Secrets Example (Streamlit Cloud):**
+
