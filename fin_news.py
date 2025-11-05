@@ -228,8 +228,6 @@ with tabs[6]:
         st.download_button("Download Markdown", md, file_name="portfolio.md")
         csv = io.StringIO(); df.to_csv(csv,index=False)
         st.download_button("Download CSV", csv.getvalue(), file_name="portfolio.csv")
-
-# ---------- FOOTER ----------
 # ---------- FOOTER ----------
 st.markdown("---")
 
@@ -240,5 +238,8 @@ st.markdown(
 - Add persistent storage (Supabase / Firebase)  
 - Integrate vectorbt or backtrader for pro backtests  
 - Enable OpenAI in Secrets for full AI functionality  
+
+**Secrets Example (Streamlit Cloud):**
+
 
 
