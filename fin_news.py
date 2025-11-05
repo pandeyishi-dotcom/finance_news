@@ -230,7 +230,9 @@ with tabs[6]:
         st.download_button("Download CSV", csv.getvalue(), file_name="portfolio.csv")
 
 # ---------- FOOTER ----------
+# ---------- FOOTER ----------
 st.markdown("---")
+
 st.markdown(
     """
 ### ✅ Next Steps
