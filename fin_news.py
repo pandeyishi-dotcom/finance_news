@@ -344,7 +344,10 @@ st.markdown(
 )
 
 st.markdown(
-    """
+    """,
+    unsafe_allow_html=True,
+)
+
 ### ✅ Next Steps
 - Integrate Polygon / Finnhub for live data  
 - Add persistent storage (Supabase / Firebase)  
