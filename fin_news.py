@@ -1,3 +1,4 @@
+# fin_news_fixed.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -66,12 +67,26 @@ with col3:
 # ---- Utilities ----
 @st.cache_data(ttl=30)
 def get_price(symbol):
+    """
+    Return dict: last, prev, info
+    Safe: returns None for missing values instead of raising.
+    """
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period="5d")
-        last = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2] if len(hist) > 1 else last
-        info = t.info
+        if hist is None or hist.empty:
+            return {"last": None, "prev": None, "info": {}}
+        # Ensure indices present
+        close = hist["Close"].dropna()
+        if close.empty:
+            return {"last": None, "prev": None, "info": {}}
+        last = float(close.iloc[-1])
+        prev = float(close.iloc[-2]) if len(close) > 1 else last
+        # info can be heavy; use get to avoid KeyErrors
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
         return {"last": last, "prev": prev, "info": info}
     except Exception:
         return {"last": None, "prev": None, "info": {}}
@@ -81,6 +96,8 @@ def get_history(symbol, period="1y", interval="1d"):
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period=period, interval=interval)
+        if hist is None or hist.empty:
+            return pd.DataFrame()
         return hist.reset_index()
     except Exception:
         return pd.DataFrame()
@@ -91,11 +108,16 @@ def render_tape():
     for s in st.session_state.watchlist:
         p = get_price(s)
         last, prev = p["last"], p["prev"]
-        if last and prev:
-            pct = (last - prev) / prev * 100
-            arrow = "▲" if pct > 0 else "▼"
-            color = "green" if pct > 0 else "red"
+        if last is not None and prev is not None:
+            try:
+                pct = (last - prev) / prev * 100 if prev != 0 else 0.0
+            except Exception:
+                pct = 0.0
+            arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "")
+            color = "green" if pct > 0 else ("red" if pct < 0 else "#9CA3AF")
             data.append(f"<b>{s}</b> {last:.2f} <span style='color:{color}'>{arrow} {pct:+.2f}%</span>")
+        else:
+            data.append(f"<b>{s}</b> -")
     html = " &nbsp; | &nbsp; ".join(data)
     st.markdown(f"<div style='padding:8px;background:#111827;border-radius:6px'>{html}</div>", unsafe_allow_html=True)
 
@@ -123,79 +145,104 @@ with tabs[0]:
         st.session_state.watchlist = [x.strip().upper() for x in wl.split(",") if x.strip()]
         st.success("Watchlist updated.")
 
-    cols = st.columns(min(4, len(st.session_state.watchlist)))
+    # Show metrics in up to 4 columns
+    cols = st.columns(min(4, max(1, len(st.session_state.watchlist))))
     for i, sym in enumerate(st.session_state.watchlist):
         data = get_price(sym)
         last, prev = data["last"], data["prev"]
-        delta = (last - prev) / prev * 100 if last and prev else 0
-        cols[i % 4].metric(sym, f"{last:.2f}" if last else "-", f"{delta:+.2f}%")
+        delta_display = "-"
+        if last is not None and prev is not None:
+            try:
+                delta = (last - prev) / prev * 100 if prev != 0 else 0.0
+                delta_display = f"{delta:+.2f}%"
+            except Exception:
+                delta_display = "-"
+        cols[i % len(cols)].metric(sym, f"{last:.2f}" if last is not None else "-", delta_display)
 
     st.markdown("---")
     sel = st.selectbox("Select ticker", st.session_state.watchlist)
     hist = get_history(sel)
-    if not hist.empty:
+    if not hist.empty and "Date" in hist.columns and "Close" in hist.columns:
         st.line_chart(hist.set_index("Date")["Close"])
     else:
-        st.warning("No data available for this symbol.")
+        st.warning("No history available for this symbol.")
 
 # ========== NEWS & AI ==========
 with tabs[1]:
     st.header("News & AI Insights")
     sym = st.selectbox("Select ticker", st.session_state.watchlist, key="news_sym")
+    # yfinance news fallback
+    news_items = []
     try:
-        news_items = yf.Ticker(sym).news[:10]
+        t = yf.Ticker(sym)
+        # Some versions of yfinance return a list at .news, guard it
+        raw_news = getattr(t, "news", None)
+        if raw_news:
+            for n in raw_news[:10]:
+                title = n.get("title") if isinstance(n, dict) else str(n)
+                publisher = n.get("publisher") if isinstance(n, dict) else ""
+                link = n.get("link") if isinstance(n, dict) else ""
+                news_items.append({"title": title, "publisher": publisher, "link": link})
     except Exception:
         news_items = []
+
     if news_items:
         for n in news_items:
-            st.markdown(f"**{n['title']}**  \n*{n['publisher']}*  \n[{n['link']}]({n['link']})")
+            st.markdown(f"**{n.get('title','-')}**")
+            if n.get("publisher"):
+                st.caption(n.get("publisher"))
+            if n.get("link"):
+                st.write(n.get("link"))
             st.markdown("---")
     else:
-        st.info("No recent news found.")
+        st.info("No recent news found via yfinance. Hook NewsAPI / vendor for richer feed.")
 
-    if OPENAI_INSTALLED and "OPENAI_API_KEY" in st.secrets:
+    # AI summary (optional)
+    if OPENAI_INSTALLED and st.secrets.get("OPENAI_API_KEY"):
         if st.button("Generate AI Summary"):
-            openai.api_key = st.secrets["OPENAI_API_KEY"]
-            titles = "\n".join([n["title"] for n in news_items])
-            prompt = f"Summarize these headlines about {sym} into short bullet points of market impact:\n{titles}"
+            titles = "\n".join([n.get("title", "") for n in news_items]) or f"No headlines for {sym}"
+            prompt = f"Summarize these headlines about {sym} into 3 concise bullets focused on market impact:\n{titles}"
             try:
+                openai.api_key = st.secrets["OPENAI_API_KEY"]
                 resp = openai.Completion.create(
                     engine="text-davinci-003",
                     prompt=prompt,
-                    max_tokens=180,
-                    temperature=0.3,
+                    max_tokens=200,
+                    temperature=0.2,
                 )
+                summary_text = resp.choices[0].text.strip() if hasattr(resp, "choices") else str(resp)
                 st.subheader("🧠 AI Summary")
-                st.write(resp.choices[0].text.strip())
+                st.write(summary_text)
             except Exception as e:
                 st.error(f"AI summary failed: {e}")
     else:
-        st.caption("Add OPENAI_API_KEY in secrets to enable AI summaries.")
+        st.caption("Add OPENAI_API_KEY to Streamlit Secrets and install 'openai' to enable AI summaries.")
 
 # ========== PORTFOLIO ==========
 with tabs[2]:
     st.header("Portfolio Simulator")
     col1, col2, col3 = st.columns(3)
-    sym = col1.text_input("Symbol")
-    qty = col2.number_input("Qty", min_value=1, value=1)
-    side = col3.selectbox("Side", ["long", "short"])
+    sym_input = col1.text_input("Symbol")
+    qty_input = col2.number_input("Qty", min_value=1, value=1)
+    side_input = col3.selectbox("Side", ["long", "short"])
     if st.button("Add Position"):
-        price = get_price(sym)["last"] or 0.0
+        price = get_price(sym_input)["last"] or 0.0
         st.session_state.positions.append(
-            {"symbol": sym.upper(), "qty": qty, "side": side, "entry": price}
+            {"symbol": sym_input.upper(), "qty": qty_input, "side": side_input, "entry": price, "created": datetime.utcnow().isoformat()}
         )
+
     if st.session_state.positions:
         df = pd.DataFrame(st.session_state.positions)
         rows = []
-        total_pnl = 0
-        for row in df.itertuples():
-            cur = get_price(row.symbol)["last"] or 0
-            pnl = (cur - row.entry) * row.qty * (1 if row.side == "long" else -1)
+        total_pnl = 0.0
+        for row in df.to_dict("records"):
+            cur = get_price(row["symbol"])["last"] or 0.0
+            pnl = (cur - row["entry"]) * row["qty"] * (1 if row["side"] == "long" else -1)
             rows.append(
                 {
-                    "Symbol": row.symbol,
-                    "Qty": row.qty,
-                    "Entry": row.entry,
+                    "Symbol": row["symbol"],
+                    "Qty": row["qty"],
+                    "Entry": row["entry"],
                     "Current": cur,
                     "PnL": pnl,
                 }
@@ -212,58 +259,64 @@ with tabs[3]:
     mcap_limit = st.number_input("Min MarketCap", 0, 1_000_000_000_000, 0)
     matches = []
     for s in st.session_state.watchlist:
-        info = get_price(s)["info"]
+        info = get_price(s)["info"] or {}
         pe = info.get("trailingPE") or 9999
         mcap = info.get("marketCap") or 0
         if pe <= pe_limit and mcap >= mcap_limit:
             matches.append({"Symbol": s, "P/E": pe, "MarketCap": mcap})
-    st.dataframe(pd.DataFrame(matches))
+    if matches:
+        st.dataframe(pd.DataFrame(matches))
+    else:
+        st.info("No matches for current screener filters.")
 
 # ========== BACKTEST ==========
 with tabs[4]:
-    st.header("Backtest: Moving Average Crossover")
-    sym = st.selectbox("Select ticker", st.session_state.watchlist, key="bt_sym")
+    st.header("Backtest: Moving Average Crossover (demo)")
+    back_sym = st.selectbox("Select ticker", st.session_state.watchlist, key="bt_sym")
     short = st.number_input("Short MA", 5, 50, 20)
     long = st.number_input("Long MA", 10, 200, 50)
-    hist = get_history(sym)
-    if not hist.empty:
+    hist = get_history(back_sym)
+    if not hist.empty and "Close" in hist.columns:
         hist["SMA_Short"] = hist["Close"].rolling(short).mean()
         hist["SMA_Long"] = hist["Close"].rolling(long).mean()
         st.line_chart(hist.set_index("Date")[["Close", "SMA_Short", "SMA_Long"]])
         st.caption("Strategy: Buy when short MA crosses above long MA, sell when below.")
     else:
-        st.warning("No data available.")
+        st.warning("No historical data available for backtest.")
 
 # ========== ALERTS ==========
 with tabs[5]:
     st.header("Alerts")
-    sym = st.text_input("Symbol for alert")
-    price = st.number_input("Target price", 0.0)
-    direction = st.selectbox("Direction", [">= (cross above)", "<= (cross below)"])
+    alert_sym = st.text_input("Symbol for alert", key="alert_sym")
+    alert_price = st.number_input("Target price", 0.0, key="alert_price")
+    direction = st.selectbox("Direction", [">= (cross above)", "<= (cross below)"], key="alert_dir")
     if st.button("Add Alert"):
-        st.session_state.alerts.append(
-            {"symbol": sym.upper(), "price": price, "dir": direction, "notified": False}
-        )
+        st.session_state.alerts.append({"symbol": alert_sym.upper(), "price": float(alert_price), "dir": direction, "notified": False, "created": datetime.utcnow().isoformat()})
         st.success("Alert added.")
 
-    st.dataframe(pd.DataFrame(st.session_state.alerts))
+    if st.session_state.alerts:
+        st.dataframe(pd.DataFrame(st.session_state.alerts))
+    else:
+        st.info("No alerts created yet.")
 
     if st.button("Check Alerts"):
+        triggered = []
         for a in st.session_state.alerts:
             cur = get_price(a["symbol"])["last"]
-            if not cur:
+            if cur is None:
                 continue
-            if (
-                a["dir"].startswith(">=")
-                and cur >= a["price"]
-                and not a["notified"]
-            ) or (
-                a["dir"].startswith("<=")
-                and cur <= a["price"]
-                and not a["notified"]
-            ):
-                st.success(f"ALERT: {a['symbol']} {a['dir']} {a['price']} (Now {cur})")
+            if a["dir"].startswith(">=") and cur >= a["price"] and not a.get("notified"):
+                triggered.append((a, cur))
                 a["notified"] = True
+            if a["dir"].startswith("<=") and cur <= a["price"] and not a.get("notified"):
+                triggered.append((a, cur))
+                a["notified"] = True
+        if triggered:
+            for tcur in triggered:
+                a, curval = tcur
+                st.success(f"ALERT: {a['symbol']} {a['dir']} {a['price']} — current {curval}")
+        else:
+            st.info("No alerts triggered at this time.")
 
 # ========== REPORTS ==========
 with tabs[6]:
@@ -275,21 +328,12 @@ with tabs[6]:
         df.to_csv(csv_buf, index=False)
         md = f"# Portfolio Report — {now}\n\n"
         md += df.to_markdown(index=False)
-        st.download_button(
-            "Download Markdown Report",
-            md,
-            file_name=f"portfolio_{datetime.utcnow().date()}.md",
-        )
-        st.download_button(
-            "Download CSV",
-            csv_buf.getvalue(),
-            file_name=f"portfolio_{datetime.utcnow().date()}.csv",
-        )
+        st.download_button("Download Markdown Report", md, file_name=f"portfolio_{datetime.utcnow().date()}.md")
+        st.download_button("Download CSV", csv_buf.getvalue(), file_name=f"portfolio_{datetime.utcnow().date()}.csv")
 
 # ---- Footer ----
 st.markdown("---")
 st.markdown(
-    st.markdown(
     """
 **Some text or table**
 - point 1  
@@ -299,6 +343,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.markdown(
+    """
 ### ✅ Next Steps
 - Integrate Polygon / Finnhub for live data  
 - Add persistent storage (Supabase / Firebase)  
