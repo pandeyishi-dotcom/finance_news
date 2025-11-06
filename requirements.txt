@@ -2,10 +2,5 @@ streamlit>=1.24
 pandas
 numpy
 yfinance
-requests
 feedparser
 streamlit-autorefresh
-# Official Google GenAI SDK (install the modern package)
-google-genai>=0.7.0
-# If the above name doesn't work in your environment, try:
-# google-generativeai
