@@ -1,95 +1,91 @@
-# app.py
-"""
-Bloomberg-Lite — Enhanced (API-free)
-Adds topic clustering, visualization, topic drill-down, improved sentiment, and optional SMTP alerts.
-"""
+# bloomberg_lite_ui_v2.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import feedparser
-import threading
 import sqlite3
+import threading
 import time
 import io
 import re
 from datetime import datetime
-from collections import Counter, defaultdict
+from collections import Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-import altair as alt
 
-# ---------------- Config ----------------
-DB_PATH = "bloomberg_lite.db"
+# ----------------------- CONFIG -----------------------
+DB_PATH = "bloomberg_lite_ui.db"
 POLL_INTERVAL_DEFAULT = 15
 RSS_QUERY_DEFAULT = "finance OR markets OR stocks"
 RSS_MAX_ITEMS = 30
-DEFAULT_N_CLUSTERS = 4
-TFIDF_MAX_FEATURES = 2000
+TFIDF_MAX_FEATURES = 1500
+DEFAULT_N_CLUSTERS = 3
 
-# ---------------- Helpers / DB ----------------
-st.set_page_config(page_title="Bloomberg-Lite — Enhanced", layout="wide")
+# ----------------------- APP SETUP -----------------------
+st.set_page_config(page_title="Bloomberg-Lite — UI v2", layout="wide", initial_sidebar_state="expanded")
+
+# --------- database helpers (lightweight sqlite) ---------
 @st.cache_resource
-def get_db_conn():
+def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    init_db(conn)
+    _init_db(conn)
     return conn
 
-def init_db(conn):
+def _init_db(conn):
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, published TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS watchlist (symbol TEXT PRIMARY KEY, added_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS prices (symbol TEXT PRIMARY KEY, price REAL, ts TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, qty INTEGER, side TEXT, entry REAL, created_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, price REAL, direction TEXT, notified INTEGER DEFAULT 0, created_at TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS watchlist(symbol TEXT PRIMARY KEY, added_at TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS prices(symbol TEXT PRIMARY KEY, price REAL, ts TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS news_cache(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, link TEXT, summary TEXT, published TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, qty INTEGER, side TEXT, entry REAL, created_at TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, price REAL, direction TEXT, notified INTEGER DEFAULT 0, created_at TEXT)""")
     conn.commit()
 
-def db_cache_news(conn, items):
+# convenience DB functions
+def db_add_watch(conn, sym):
+    if not sym: return
     c = conn.cursor()
-    c.execute("DELETE FROM news_cache")
-    for n in items:
-        c.execute("INSERT INTO news_cache(title, link, summary, published) VALUES (?, ?, ?, ?)",
-                  (n.get("title"), n.get("link"), n.get("summary"), n.get("published")))
-    conn.commit()
-
-def db_get_news(conn):
-    c = conn.cursor()
-    c.execute("SELECT id, title, link, summary, published FROM news_cache ORDER BY id DESC")
-    rows = c.fetchall()
-    return [dict(r) for r in rows]
-
-def db_update_price(conn, symbol, price):
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO prices(symbol, price, ts) VALUES (?, ?, ?)", (symbol.upper(), float(price), datetime.utcnow().isoformat()))
-    conn.commit()
-
-def db_get_prices(conn):
-    c = conn.cursor()
-    c.execute("SELECT symbol, price, ts FROM prices")
-    return {r["symbol"]: {"price": r["price"], "ts": r["ts"]} for r in c.fetchall()}
-
-def db_add_watch(conn, symbol):
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO watchlist(symbol, added_at) VALUES (?, ?)", (symbol.upper(), datetime.utcnow().isoformat()))
+    c.execute("INSERT OR IGNORE INTO watchlist(symbol, added_at) VALUES (?, ?)", (sym.upper().strip(), datetime.utcnow().isoformat()))
     conn.commit()
 
 def db_get_watch(conn):
     c = conn.cursor()
     c.execute("SELECT symbol FROM watchlist ORDER BY symbol")
-    return [r["symbol"] for r in c.fetchall()]
+    return [r['symbol'] for r in c.fetchall()]
 
-def db_delete_watch(conn, symbol):
+def db_remove_watch(conn, sym):
     c = conn.cursor()
-    c.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+    c.execute("DELETE FROM watchlist WHERE symbol = ?", (sym.upper().strip(),))
     conn.commit()
 
-def db_add_position(conn, symbol, qty, side, entry):
+def db_update_price(conn, sym, price):
     c = conn.cursor()
-    c.execute("INSERT INTO positions(symbol, qty, side, entry, created_at) VALUES (?, ?, ?, ?, ?)",
-              (symbol.upper(), int(qty), side, float(entry), datetime.utcnow().isoformat()))
+    c.execute("INSERT OR REPLACE INTO prices(symbol, price, ts) VALUES (?, ?, ?)", (sym.upper().strip(), float(price), datetime.utcnow().isoformat()))
+    conn.commit()
+
+def db_get_prices(conn):
+    c = conn.cursor()
+    c.execute("SELECT symbol, price, ts FROM prices")
+    return {r['symbol']:{'price':r['price'],'ts':r['ts']} for r in c.fetchall()}
+
+def db_cache_news(conn, items):
+    c = conn.cursor()
+    c.execute("DELETE FROM news_cache")
+    for n in items:
+        c.execute("INSERT INTO news_cache(title, link, summary, published) VALUES (?, ?, ?, ?)", (n.get('title'), n.get('link'), n.get('summary'), n.get('published')))
+    conn.commit()
+
+def db_get_news(conn, limit=100):
+    c = conn.cursor()
+    c.execute("SELECT id, title, link, summary, published FROM news_cache ORDER BY id DESC LIMIT ?", (limit,))
+    return [dict(r) for r in c.fetchall()]
+
+def db_add_position(conn, sym, qty, side, entry):
+    c = conn.cursor()
+    c.execute("INSERT INTO positions(symbol, qty, side, entry, created_at) VALUES (?, ?, ?, ?, ?)", (sym.upper(), int(qty), side, float(entry), datetime.utcnow().isoformat()))
     conn.commit()
 
 def db_get_positions(conn):
@@ -97,10 +93,9 @@ def db_get_positions(conn):
     c.execute("SELECT * FROM positions ORDER BY created_at DESC")
     return [dict(r) for r in c.fetchall()]
 
-def db_add_alert(conn, symbol, price, direction):
+def db_add_alert(conn, sym, price, direction):
     c = conn.cursor()
-    c.execute("INSERT INTO alerts(symbol, price, direction, notified, created_at) VALUES (?, ?, ?, 0, ?)",
-              (symbol.upper(), float(price), direction, datetime.utcnow().isoformat()))
+    c.execute("INSERT INTO alerts(symbol, price, direction, notified, created_at) VALUES (?, ?, ?, 0, ?)", (sym.upper(), float(price), direction, datetime.utcnow().isoformat()))
     conn.commit()
 
 def db_get_alerts(conn):
@@ -108,399 +103,320 @@ def db_get_alerts(conn):
     c.execute("SELECT * FROM alerts ORDER BY created_at DESC")
     return [dict(r) for r in c.fetchall()]
 
-def db_mark_alert_notified(conn, alert_id):
+def db_mark_alert(conn, alert_id):
     c = conn.cursor()
-    c.execute("UPDATE alerts SET notified = 1 WHERE id = ?", (alert_id,))
+    c.execute("UPDATE alerts SET notified=1 WHERE id=?", (int(alert_id),))
     conn.commit()
 
-# ---------------- News fetch ----------------
-def fetch_google_rss(query=RSS_QUERY_DEFAULT, max_items=RSS_MAX_ITEMS):
-    q_ = query.replace(" ", "+")
-    url = f"https://news.google.com/rss/search?q={q_}&hl=en-IN&gl=IN&ceid=IN:en"
-    feed = feedparser.parse(url)
-    items = []
-    for e in feed.entries[:max_items]:
-        items.append({
-            "title": getattr(e, "title", ""),
-            "link": getattr(e, "link", ""),
-            "summary": getattr(e, "summary", ""),
-            "published": getattr(e, "published", "")
-        })
-    return items
+# ---------------- yfinance helpers ----------------
 
-# ---------------- Price fetcher ----------------
-def fetch_price_yf(symbol):
+def fetch_price(sym):
     try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="1d", interval="1m")
+        t = yf.Ticker(sym)
+        df = t.history(period='1d', interval='1m')
         if df is None or df.empty:
-            df2 = t.history(period="5d", interval="1d")
+            df2 = t.history(period='5d', interval='1d')
             if df2 is None or df2.empty:
                 return None
-            return float(df2["Close"].iloc[-1])
-        return float(df["Close"].iloc[-1])
+            return float(df2['Close'].iloc[-1])
+        return float(df['Close'].iloc[-1])
     except Exception:
         return None
 
-# ---------------- Poller ----------------
-class Poller(threading.Thread):
-    def __init__(self, conn, interval=15):
+# ---------------- RSS news ----------------
+@st.cache_data(ttl=300)
+def fetch_news_rss(q=RSS_QUERY_DEFAULT, max_items=30):
+    q2 = q.replace(' ', '+')
+    url = f"https://news.google.com/rss/search?q={q2}&hl=en-IN&gl=IN&ceid=IN:en"
+    feed = feedparser.parse(url)
+    out = []
+    for e in feed.entries[:max_items]:
+        out.append({'title': getattr(e,'title',''), 'link':getattr(e,'link',''), 'summary': getattr(e,'summary',''), 'published': getattr(e,'published','')})
+    return out
+
+# ---------------- Poller thread ----------------
+class PricePoller(threading.Thread):
+    def __init__(self, conn, interval=POLL_INTERVAL_DEFAULT):
         super().__init__(daemon=True)
         self.conn = conn
-        self.interval = max(5, int(interval))
+        self.interval = max(5,int(interval))
         self._stop = threading.Event()
     def run(self):
         while not self._stop.is_set():
-            syms = db_get_watch(self.conn)
-            for s in syms:
-                try:
-                    p = fetch_price_yf(s)
-                    if p is not None:
-                        db_update_price(self.conn, s, p)
-                except Exception:
-                    pass
+            symbols = db_get_watch(self.conn)
+            for s in symbols:
+                p = fetch_price(s)
+                if p is not None:
+                    db_update_price(self.conn, s, p)
             for _ in range(self.interval):
                 if self._stop.is_set(): break
                 time.sleep(1)
     def stop(self):
         self._stop.set()
 
-# ---------------- Text processing & clustering ----------------
-def build_corpus_from_rows(rows):
+# ---------------- Text summarizer & clustering ----------------
+
+def build_corpus(rows):
     corpus = []
-    titles = []
     for r in rows:
-        t = (r.get("title") or "") + ". " + (r.get("summary") or "")
-        corpus.append(t.strip())
-        titles.append(r.get("title") or "")
-    return corpus, titles
+        corpus.append((r.get('title') or '') + '. ' + (r.get('summary') or ''))
+    return corpus
 
-def tfidf_vectorize(corpus, max_features=TFIDF_MAX_FEATURES):
-    vect = TfidfVectorizer(stop_words='english', max_features=max_features, ngram_range=(1,2))
+@st.cache_data(ttl=300)
+def tfidf_cluster(corpus, n_clusters=DEFAULT_N_CLUSTERS):
+    if not corpus:
+        return None
+    vect = TfidfVectorizer(stop_words='english', max_features=TFIDF_MAX_FEATURES, ngram_range=(1,2))
     X = vect.fit_transform(corpus)
-    return X, vect
-
-def cluster_and_label(X, vect, n_clusters=DEFAULT_N_CLUSTERS):
-    # KMeans clustering on TF-IDF
-    if X.shape[0] == 0:
-        return [], []
-    kmeans = KMeans(n_clusters=max(1, int(min(n_clusters, X.shape[0]))), random_state=42, n_init=10)
-    labels = kmeans.fit_predict(X)
-    # get top terms per cluster
-    terms = np.array(vect.get_feature_names_out())
-    centers = kmeans.cluster_centers_
+    k = min(int(n_clusters), max(1, X.shape[0]))
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    labels = km.fit_predict(X)
+    terms = vect.get_feature_names_out()
+    centers = km.cluster_centers_
     top_terms = []
     for i in range(centers.shape[0]):
-        idx = np.argsort(-centers[i])[:8]
-        top = " ".join(terms[idx][:4])
-        top_terms.append(top)
-    return labels, top_terms, kmeans
-
-def pca_2d(X):
+        idx = np.argsort(-centers[i])[:6]
+        top_terms.append(' '.join(terms[idx][:4]))
     # reduce to 2D for plotting
-    if X.shape[0] <= 2:
-        return np.hstack([np.zeros((X.shape[0],1)), np.arange(X.shape[0])[:,None]])
-    scaler = StandardScaler(with_mean=False)
-    Xs = scaler.fit_transform(X.toarray() if hasattr(X, "toarray") else X)
-    pca = PCA(n_components=2, random_state=42)
-    coords = pca.fit_transform(Xs)
-    return coords
-
-# ---------------- Sentiment heuristic ----------------
-UP_WORDS = {"rise","rises","rose","gain","gains","surge","soar","beat","beats","strong","upgrade","bull","bullish","optimis"}
-DOWN_WORDS = {"fall","falls","fell","drop","drops","decline","slump","miss","misses","weak","downgrade","bear","bearish","loss"}
-
-def tone_score(texts):
-    s = 0
-    for t in texts:
-        toks = [w.lower().strip(".,;()[]") for w in re.findall(r"\w+", t)]
-        for w in toks:
-            if w in UP_WORDS: s += 1
-            if w in DOWN_WORDS: s -= 1
-    if s > 0: return "Bullish"
-    if s < 0: return "Bearish"
-    return "Neutral"
-
-# ---------------- SMTP send (optional) ----------------
-def send_email_via_smtp(to_email, subject, body):
-    # This is optional. Provide SMTP_* keys in .streamlit/secrets.toml to enable.
     try:
-        smtp_host = st.secrets.get("SMTP_HOST")
-        smtp_port = int(st.secrets.get("SMTP_PORT")) if st.secrets.get("SMTP_PORT") else 587
-        smtp_user = st.secrets.get("SMTP_USER")
-        smtp_pass = st.secrets.get("SMTP_PASS")
-        from_email = st.secrets.get("SMTP_FROM") or smtp_user
-        if not smtp_host or not smtp_user or not smtp_pass:
-            raise RuntimeError("SMTP credentials not set in secrets.")
-        import smtplib, ssl
-        from email.message import EmailMessage
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = from_email
-        msg["To"] = to_email
-        msg.set_content(body)
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls(context=ctx)
-            server.login(smtp_user, smtp_pass)
-            server.send_message(msg)
-        return True, "Sent"
-    except Exception as e:
-        return False, str(e)
+        scaler = StandardScaler(with_mean=False)
+        Xs = scaler.fit_transform(X.toarray())
+        pca = PCA(n_components=2, random_state=42)
+        coords = pca.fit_transform(Xs)
+    except Exception:
+        coords = np.zeros((len(corpus),2))
+    return dict(labels=labels, top_terms=top_terms, coords=coords)
 
-# ---------------- App UI ----------------
-conn = get_db_conn()
-if "poller" not in st.session_state:
+# ---------------- UI helpers ----------------
+
+def metric_card(symbol, price, prev_price=None, updated=None):
+    # returns a small column-block for display
+    if price is None:
+        st.metric(label=symbol, value='—')
+        return
+    if prev_price is None:
+        change = 0.0
+    else:
+        change = price - prev_price
+    change_pct = (change/prev_price*100) if prev_price and prev_price!=0 else 0.0
+    st.metric(label=symbol, value=f"{price:.2f}", delta=f"{change_pct:.2f}%")
+    if updated:
+        st.caption(f"Updated: {updated}")
+
+# ----------------- App UI -----------------
+conn = get_conn()
+if 'poller' not in st.session_state:
     st.session_state.poller = None
 
-st.title("📡 Bloomberg-Lite — Enhanced (API-free)")
-
-tabs = st.tabs(["Market", "News & Topics", "Portfolio", "Alerts", "Reports", "Settings"])
-
-# ---------- MARKET ----------
-with tabs[0]:
-    st.header("Market — Watchlist & Live Prices")
-    c1, c2, c3 = st.columns([3,1,1])
-    with c1:
-        new_sym = st.text_input("Add ticker (e.g., AAPL, RELIANCE.NS)", "")
-        if st.button("Add"):
-            if new_sym.strip():
-                db_add_watch(conn, new_sym.strip())
-                st.success(f"Added {new_sym.strip().upper()}")
-    with c2:
-        interval = st.number_input("Poll interval (secs)", min_value=5, value=POLL_INTERVAL_DEFAULT, step=1)
-    with c3:
-        if st.session_state.poller and st.session_state.poller.is_alive():
-            if st.button("Stop Poller"):
-                st.session_state.poller.stop()
-                st.session_state.poller = None
-                st.success("Stopped poller.")
-        else:
-            if st.button("Start Poller"):
-                poller = Poller(conn, interval=interval)
-                poller.start()
-                st.session_state.poller = poller
-                st.success("Started poller.")
-
-    wl = db_get_watch(conn)
-    prices = db_get_prices(conn)
-    if wl:
-        df_rows = []
-        for s in wl:
-            pinfo = prices.get(s)
-            df_rows.append({"symbol": s, "price": pinfo["price"] if pinfo else None, "updated": pinfo["ts"] if pinfo else None})
-        st.table(pd.DataFrame(df_rows))
-        sel = st.selectbox("Chart symbol", wl)
-        if sel:
-            hist = yf.Ticker(sel).history(period="3mo", interval="1d")
-            if hist is not None and not hist.empty:
-                hist = hist.reset_index()
-                st.line_chart(hist.set_index("Date")["Close"])
-            else:
-                st.info("No historical data.")
+# Sidebar — controls and quick actions
+with st.sidebar:
+    st.markdown("# Bloomberg-Lite")
+    st.write("**API-free edition — UI v2**")
+    st.markdown("---")
+    st.subheader("Quick controls")
+    watch_sym = st.text_input("Add symbol to watchlist", value="")
+    if st.button("Add to watchlist"):
+        if watch_sym.strip():
+            db_add_watch(conn, watch_sym.strip())
+            st.success(f"Added {watch_sym.strip().upper()} to watchlist")
+    st.write("")
+    poll_interval = st.number_input("Background poll interval (secs)", min_value=5, value=POLL_INTERVAL_DEFAULT)
+    if st.session_state.poller and st.session_state.poller.is_alive():
+        if st.button("Stop background polling"):
+            st.session_state.poller.stop()
+            st.session_state.poller = None
+            st.success("Stopped poller")
     else:
-        st.info("Watchlist empty. Add symbols above.")
+        if st.button("Start background polling"):
+            poller = PricePoller(conn, interval=poll_interval)
+            poller.start()
+            st.session_state.poller = poller
+            st.success("Started background poller")
+    st.markdown("---")
+    st.subheader("Search & fetch news")
+    rss_q = st.text_input("RSS query", value=RSS_QUERY_DEFAULT)
+    if st.button("Fetch News (RSS)"):
+        items = fetch_news_rss(rss_q, max_items=RSS_MAX_ITEMS)
+        db_cache_news(conn, items)
+        st.success(f"Fetched {len(items)} items")
+    st.markdown("---")
+    st.caption("Tip: Use the News & Topics tab to cluster, export and drill into topics.")
+    st.markdown("---")
+    st.write("Made with ❤️ — local & private")
 
-# ---------- NEWS & TOPICS ----------
+# Top header with metrics
+st.markdown("# Market Dashboard")
+col1, col2 = st.columns([3,1])
+with col2:
+    if st.button("Refresh Prices Now"):
+        for s in db_get_watch(conn):
+            p = fetch_price(s)
+            if p is not None:
+                db_update_price(conn, s, p)
+        st.success("Prices refreshed")
+
+# show metric cards for top 4 watchlist symbols
+watch = db_get_watch(conn)
+prices = db_get_prices(conn)
+cols = st.columns(4)
+for i in range(4):
+    with cols[i]:
+        if i < len(watch):
+            s = watch[i]
+            pinfo = prices.get(s)
+            if pinfo:
+                metric_card(s, pinfo['price'], prev_price=None, updated=pinfo.get('ts'))
+            else:
+                st.metric(label=s, value='—')
+        else:
+            st.write("")
+
+st.markdown("---")
+
+# Main tabs
+tabs = st.tabs(["Market", "News & Topics", "Portfolio", "Alerts", "Reports", "Help"])
+
+# MARKET tab
+with tabs[0]:
+    st.subheader("Watchlist & Charts")
+    watch = db_get_watch(conn)
+    prices = db_get_prices(conn)
+    if not watch:
+        st.info("Your watchlist is empty — add symbols in the sidebar.")
+    else:
+        # compact table with actions
+        df_rows = []
+        for s in watch:
+            p = prices.get(s)
+            df_rows.append({"symbol": s, "price": (p['price'] if p else None), "updated": (p['ts'] if p else None)})
+        st.dataframe(pd.DataFrame(df_rows))
+        with st.expander("Chart & details"):
+            symbol = st.selectbox("Select symbol to view", watch)
+            if symbol:
+                hist = yf.Ticker(symbol).history(period='3mo', interval='1d')
+                if hist is not None and not hist.empty:
+                    hist = hist.reset_index()
+                    st.line_chart(hist.set_index('Date')['Close'])
+                else:
+                    st.info("No historical data available.")
+
+# NEWS & TOPICS
 with tabs[1]:
-    st.header("News & Topic Clustering (local TF-IDF)")
-    q, kcol = st.columns([4,1])
-    with q:
-        query = st.text_input("RSS search query", value=RSS_QUERY_DEFAULT)
-    with kcol:
-        if st.button("Fetch & Cache News"):
-            items = fetch_google_rss(query, max_items=RSS_MAX_ITEMS)
-            db_cache_news(conn, items)
-            st.success(f"Cached {len(items)} items.")
+    st.subheader("News — readable cards & topic clustering")
     news_rows = db_get_news(conn)
     if not news_rows:
-        st.info("No news cached. Click 'Fetch & Cache News'.")
+        st.info("No news cached. Use the sidebar 'Fetch News (RSS)'.")
     else:
-        st.write(f"Cached news: {len(news_rows)} items")
-        ncol1, ncol2 = st.columns([2,1])
-        with ncol2:
-            n_clusters = st.number_input("Number of clusters", min_value=1, max_value=12, value=DEFAULT_N_CLUSTERS, step=1)
-            if st.button("Run clustering"):
-                with st.spinner("Computing TF-IDF & clusters..."):
-                    corpus, titles = build_corpus_from_rows(news_rows)
-                    X, vect = tfidf_vectorize(corpus)
-                    labels, top_terms, kmeans = cluster_and_label(X, vect, n_clusters=n_clusters)
-                    coords = pca_2d(X)
-                    # build dataframe for visualization
-                    viz_df = pd.DataFrame({
-                        "id": [r["id"] for r in news_rows],
-                        "title": titles,
-                        "cluster": labels,
-                        "x": coords[:,0] if coords.shape[0] == len(labels) else np.zeros(len(labels)),
-                        "y": coords[:,1] if coords.shape[0] == len(labels) else np.arange(len(labels))
-                    })
-                    # attach cluster labels
-                    cluster_meta = {i: top_terms[i] for i in range(len(top_terms))}
-                    st.session_state.viz_df = viz_df
-                    st.session_state.cluster_meta = cluster_meta
-                    st.success("Clustering complete.")
-        # show visualization if present
-        if st.session_state.get("viz_df") is not None:
-            viz_df = st.session_state.viz_df
-            cluster_meta = st.session_state.cluster_meta
-            st.subheader("Clusters — click points to inspect")
-            chart = alt.Chart(viz_df).mark_circle(size=100).encode(
-                x="x:Q",
-                y="y:Q",
-                color=alt.Color("cluster:N", legend=alt.Legend(title="Cluster")),
-                tooltip=["title", "cluster"]
-            ).interactive().properties(height=400)
-            selected = alt.selection_single(fields=["cluster"], bind="legend", clear=True)
-            st.altair_chart(chart.add_selection(selected), use_container_width=True)
+        # headline cards
+        for r in news_rows[:8]:
+            st.markdown(f"### {r['title']}")
+            cols = st.columns([5,1])
+            cols[0].markdown(f"_{r.get('summary','')[:350]}_")
+            cols[1].markdown(f"[{r.get('published','')}]\n\n[Read]({r.get('link','')})")
+            st.markdown('---')
+        # clustering
+        st.markdown("### Topic clustering (TF-IDF + KMeans)")
+        k = st.number_input("Number of clusters", min_value=1, max_value=8, value=DEFAULT_N_CLUSTERS)
+        if st.button("Run clustering on cached news"):
+            corpus = build_corpus(news_rows)
+            with st.spinner("Running TF-IDF & clustering..."):
+                out = tfidf_cluster(corpus, n_clusters=k)
+                if out is None:
+                    st.warning("Not enough documents to cluster.")
+                else:
+                    labels = out['labels']
+                    top_terms = out['top_terms']
+                    coords = out['coords']
+                    # show cluster cards
+                    for ci in range(len(top_terms)):
+                        col_a, col_b = st.columns([4,1])
+                        with col_a:
+                            st.write(f"**Topic {ci} — {top_terms[ci]}**")
+                            # list headlines in cluster
+                            hits = [news_rows[i] for i,l in enumerate(labels) if l==ci]
+                            for h in hits[:5]:
+                                st.markdown(f"- {h['title']}  ")
+                        with col_b:
+                            st.write(f"{len(hits)} items")
+                    st.success('Clustering done — inspect topic cards above.')
 
-            # cluster summary table
-            meta_rows = []
-            counts = viz_df["cluster"].value_counts().to_dict()
-            for cidx, label in cluster_meta.items():
-                meta_rows.append({"cluster": cidx, "label_terms": label, "count": int(counts.get(cidx, 0))})
-            st.table(pd.DataFrame(meta_rows))
-
-            # drilldown control
-            cluster_choice = st.number_input("View cluster #", min_value=int(viz_df["cluster"].min()), max_value=int(viz_df["cluster"].max()), value=int(viz_df["cluster"].min()))
-            hits = viz_df[viz_df["cluster"] == cluster_choice]
-            st.write(f"Cluster {cluster_choice} — label: {cluster_meta.get(cluster_choice)} — {len(hits)} items")
-            # show headlines in cluster
-            cluster_ids = set(hits["id"].tolist())
-            cluster_rows = [r for r in news_rows if r["id"] in cluster_ids]
-            for r in cluster_rows:
-                st.markdown(f"**{r['title']}**  \n*{r['published']}*  \n[{r['link']}]({r['link']})")
-                if r.get("summary"):
-                    st.markdown(f"_{r['summary']}_")
-                st.markdown("---")
-            # export cluster CSV
-            if st.button("Export cluster to CSV"):
-                out_df = pd.DataFrame(cluster_rows)
-                buf = io.StringIO()
-                out_df.to_csv(buf, index=False)
-                st.download_button("Download CSV", buf.getvalue(), file_name=f"cluster_{cluster_choice}.csv", mime="text/csv")
-
-            # cluster tone
-            cluster_texts = [ (r.get("title") or "") + ". " + (r.get("summary") or "") for r in cluster_rows ]
-            if cluster_texts:
-                tone = tone_score(cluster_texts)
-                st.write(f"Cluster tone (heuristic): **{tone}**")
-
-# ---------- PORTFOLIO ----------
+# PORTFOLIO tab
 with tabs[2]:
-    st.header("Portfolio")
-    psym = st.text_input("Symbol to add", "")
-    pqty = st.number_input("Qty", min_value=1, value=1)
-    pside = st.selectbox("Side", ["long", "short"])
+    st.subheader("Portfolio — quick add & export")
+    sym = st.text_input("Symbol to add to portfolio", '')
+    qty = st.number_input("Qty", min_value=1, value=1)
+    side = st.selectbox("Side", ['long','short'])
     if st.button("Add position"):
-        entry = fetch_price_yf(psym) or 0.0
-        db_add_position(conn, psym, pqty, pside, entry)
-        st.success(f"Added {psym.upper()} {pqty} {pside} @ {entry:.4f}")
-    pos = db_get_positions(conn)
-    if pos:
-        st.dataframe(pd.DataFrame(pos))
+        entry = fetch_price(sym) or 0.0
+        db_add_position(conn, sym, qty, side, entry)
+        st.success(f"Added {sym.upper()} {qty} {side} @ {entry:.2f}")
+    positions = db_get_positions(conn)
+    if positions:
+        st.dataframe(pd.DataFrame(positions))
     else:
-        st.info("No positions yet.")
+        st.info('No positions yet.')
 
-# ---------- ALERTS ----------
+# ALERTS tab
 with tabs[3]:
-    st.header("Alerts (with optional SMTP sending)")
-    asymbol = st.text_input("Symbol (alert)", key="alert_symbol")
-    aprice = st.number_input("Target price", value=0.0, key="alert_price_input")
-    adir = st.selectbox("Direction", [">= (cross above)", "<= (cross below)"])
-    if st.button("Create alert"):
-        if asymbol.strip():
-            db_add_alert(conn, asymbol, aprice, adir)
-            st.success("Alert created.")
+    st.subheader("Alerts — create & test")
+    a_sym = st.text_input("Alert symbol", key='alert_sym')
+    a_price = st.number_input('Target price', value=0.0, format='%.4f')
+    a_dir = st.selectbox('Direction', ['>= (cross above)', '<= (cross below)'])
+    if st.button('Create Alert'):
+        if a_sym.strip():
+            db_add_alert(conn, a_sym, a_price, a_dir)
+            st.success('Alert created.')
     alerts = db_get_alerts(conn)
     if alerts:
         st.table(pd.DataFrame(alerts))
     else:
-        st.info("No alerts configured.")
-    if st.button("Run alert check now"):
+        st.info('No alerts configured.')
+    if st.button('Run alerts now'):
         prices = db_get_prices(conn)
-        any_fire = False
+        fired = False
         for a in alerts:
-            sym = a["symbol"]
+            sym = a['symbol']
             pinfo = prices.get(sym)
-            cur = pinfo["price"] if pinfo else fetch_price_yf(sym)
-            if cur is None:
-                continue
-            if a["direction"].startswith(">=") and cur >= a["price"] and not a["notified"]:
+            cur = pinfo['price'] if pinfo else fetch_price(sym)
+            if cur is None: continue
+            if a['direction'].startswith('>=') and cur >= a['price'] and not a['notified']:
                 st.success(f"ALERT: {sym} >= {a['price']} (now {cur})")
-                db_mark_alert_notified(conn, a["id"])
-                any_fire = True
-                # optionally send email if SMTP configured
-                if st.secrets.get("SMTP_HOST"):
-                    to = st.secrets.get("ALERT_TO_EMAIL")
-                    if to:
-                        subj = f"Price Alert: {sym} >= {a['price']}"
-                        body = f"{sym} crossed above {a['price']} (now {cur})"
-                        ok, msg = send_email_via_smtp(to, subj, body)
-                        if ok: st.info("Email alert sent.")
-                        else: st.warning(f"Email send failed: {msg}")
-            if a["direction"].startswith("<=") and cur <= a["price"] and not a["notified"]:
+                db_mark_alert(conn, a['id'])
+                fired = True
+            if a['direction'].startswith('<=') and cur <= a['price'] and not a['notified']:
                 st.success(f"ALERT: {sym} <= {a['price']} (now {cur})")
-                db_mark_alert_notified(conn, a["id"])
-                any_fire = True
-                if st.secrets.get("SMTP_HOST"):
-                    to = st.secrets.get("ALERT_TO_EMAIL")
-                    if to:
-                        subj = f"Price Alert: {sym} <= {a['price']}"
-                        body = f"{sym} crossed below {a['price']} (now {cur})"
-                        ok, msg = send_email_via_smtp(to, subj, body)
-                        if ok: st.info("Email alert sent.")
-                        else: st.warning(f"Email send failed: {msg}")
-        if not any_fire:
-            st.info("No alerts triggered.")
+                db_mark_alert(conn, a['id'])
+                fired = True
+        if not fired:
+            st.info('No alerts triggered.')
 
-# ---------- REPORTS ----------
+# REPORTS tab
 with tabs[4]:
-    st.header("Reports & Export")
-    if st.button("Export all cached news (CSV)"):
-        news_rows = db_get_news(conn)
-        if not news_rows:
-            st.warning("No news cached.")
+    st.subheader('Reports & Export')
+    if st.button('Export news as CSV'):
+        rows = db_get_news(conn)
+        if not rows:
+            st.warning('No news to export')
         else:
-            df = pd.DataFrame(news_rows)
+            df = pd.DataFrame(rows)
             buf = io.StringIO()
             df.to_csv(buf, index=False)
-            st.download_button("Download news CSV", buf.getvalue(), file_name="news_cache.csv", mime="text/csv")
-    if st.button("Export prices"):
-        prices = db_get_prices(conn)
-        if not prices:
-            st.warning("No prices stored.")
+            st.download_button('Download news CSV', buf.getvalue(), file_name='news_cache.csv')
+    if st.button('Export watchlist'):
+        wl = db_get_watch(conn)
+        if not wl:
+            st.warning('No watchlist symbols')
         else:
-            df = pd.DataFrame([{"symbol":k,"price":v["price"],"ts":v["ts"]} for k,v in prices.items()])
-            buf = io.StringIO()
-            df.to_csv(buf, index=False)
-            st.download_button("Download prices CSV", buf.getvalue(), file_name="prices.csv", mime="text/csv")
+            st.download_button('Download watchlist.txt', '\n'.join(wl), file_name='watchlist.txt')
 
-# ---------- SETTINGS ----------
+# HELP tab
 with tabs[5]:
-    st.header("Settings & Maintenance")
-    st.write("DB path:", DB_PATH)
-    if st.button("Clear news cache"):
-        c = conn.cursor(); c.execute("DELETE FROM news_cache"); conn.commit(); st.success("Cleared news.")
-    if st.button("Reset all data (danger)"):
-        with st.expander("Confirm reset"):
-            if st.button("Confirm full reset"):
-                c = conn.cursor()
-                for t in ["news_cache","watchlist","prices","positions","alerts"]:
-                    c.execute(f"DELETE FROM {t}")
-                conn.commit()
-                st.success("Database reset. Please refresh.")
-                st.experimental_rerun()
-    st.markdown("""
-    **SMTP alerts (optional)** — to enable, add these keys to `.streamlit/secrets.toml` or Streamlit Cloud secrets:
-    ```
-    SMTP_HOST = "smtp.example.com"
-    SMTP_PORT = "587"
-    SMTP_USER = "your_smtp_user"
-    SMTP_PASS = "your_smtp_password"
-    SMTP_FROM = "alerts@you.com"  # optional
-    ALERT_TO_EMAIL = "you@youremail.com"
-    ```
-    """)
+    st.header('Help & UX tips')
+    st.markdown('- Use the **sidebar** to quickly add symbols and fetch news.')
+    st.markdown('- Start background polling to keep prices refreshed automatically.')
+    st.markdown('- Use the News & Topics tab to cluster headlines into topics and inspect each cluster.')
+    st.markdown('- Portfolio and Alerts persist locally in `bloomberg_lite_ui.db` (in project folder).')
+    st.markdown('- This UI focuses on readability: larger cards, metrics, and concise actions.')
 
-st.markdown("---")
-st.markdown("**Notes:** everything is local & API-free (except yfinance for price lookup). For production you can migrate the SQLite DB to Supabase/Postgres and run the poller as a separate worker.")
+st.markdown('---')
+st.caption('If you want additional visual polish (colors, icons, or custom CSS), I can add a theme + CSS injection next.')
